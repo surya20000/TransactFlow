@@ -1,0 +1,17 @@
+[project]
+name = "transactflow"
+version = "1.0.0"
+description = "Batch transaction pipeline with risk feature serving"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths    = ["api/tests"]
+asyncio_mode = "auto"

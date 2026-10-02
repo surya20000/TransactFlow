@@ -1,0 +1,136 @@
+version: "3.9"
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.11
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__WEBSERVER__SECRET_KEY: "transactflow-secret"
+    POSTGRES_USER: transactflow
+    POSTGRES_PASSWORD: transactflow
+    POSTGRES_DB: transactflow
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    AWS_DEFAULT_REGION: us-east-1
+    S3_ENDPOINT_URL: http://localstack:4566
+    TRANSACTFLOW_S3_BUCKET: transactflow-data
+  volumes:
+    - ./pipeline/dags:/opt/airflow/dags
+    - ./spark:/opt/airflow/spark
+    - ./generator:/opt/airflow/generator
+    - ./data_quality:/opt/airflow/data_quality
+    - ./sql:/opt/airflow/sql
+    - airflow-logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+
+services:
+
+  # Separate Postgres instance for Airflow metadata (keeps it isolated from our data DB)
+  airflow-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: transactflow
+      POSTGRES_PASSWORD: transactflow
+      POSTGRES_DB: transactflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transactflow"]
+      interval: 10s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+      LOCALSTACK_HOST: localstack
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 15s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin --password admin
+          --firstname Admin --lastname User
+          --role Admin --email admin@transactflow.local
+      "
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_USER:     transactflow
+      POSTGRES_PASSWORD: transactflow
+      POSTGRES_DB:       transactflow
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      retries: 5
+
+volumes:
+  airflow-db-data:
+  postgres-data:
+  localstack-data:
+  airflow-logs:
